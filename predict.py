@@ -63,7 +63,7 @@ class Predictor(BasePredictor):
         #     cls=MusicGen,
         #     model_id="facebook/musicgen-large",
         # )
-        self.large_model = MusicGen.get_pretrained('facebook/facebook/musicgen-stereo-large')
+        self.large_model = MusicGen.get_pretrained('facebook/musicgen-stereo-large')
 
         self.mbd = MultiBandDiffusion.get_mbd_musicgen()
 
@@ -89,12 +89,6 @@ class Predictor(BasePredictor):
             default=90.0,
             ge=40,
             le=300,
-        ),
-        variations: int = Input(
-            description="Number of variations to generate",
-            default=1,
-            ge=1,
-            le=20,
         ),
         max_duration: int = Input(
             description="Maximum duration of the generated loop in seconds.",
@@ -220,6 +214,8 @@ class Predictor(BasePredictor):
             wav, tokens = model.generate([prompt], return_tokens=True, progress=True)
             
         if use_multiband_diffusion:
+            left, right = model.compression_model.get_left_right_codes(tokens)
+            tokens = torch.cat([left, right])
             wav = self.mbd.tokens_to_wav(tokens)
 
         wav = wav.cpu().detach().numpy()[0, 0]
