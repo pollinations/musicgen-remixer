@@ -17,7 +17,7 @@ build:
   system_packages:
     - "portaudio19-dev"
     - "rubberband-cli"
-    - ffmpeg
+    - "ffmpeg"
   # a list of packages in the format <package-name>==<version>
   python_packages:
     - "torch==2.0.1"
@@ -28,8 +28,7 @@ build:
 
   # commands run after the environment is setup
   run:
-    - "pip install -U git+https://git@github.com/facebookresearch/audiocraft#egg=audiocraft"
-    - "apt-get update && apt-get install -y ffmpeg"
+    - "pip install -U git+https://github.com/facebookresearch/audiocraft.git@ab95eebc03f2951ebb75cf61398d82020787e4a3#egg=audiocraft"
 
 # predict.py defines how predictions are run on your model
 predict: "predict.py:Predictor"

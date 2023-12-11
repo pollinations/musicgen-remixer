@@ -43,6 +43,8 @@ import numpy as np
 import pyrubberband as pyrb
 
 
+MAX_TRIES = 3
+
 
 class Predictor(BasePredictor):
     def setup(self):
@@ -163,99 +165,105 @@ class Predictor(BasePredictor):
 
         print("Generating variation 1")
 
-        if audio_input:
-            audio_prompt, sample_rate = torchaudio.load(audio_input)
-            # normalize
-            audio_prompt = audio_prompt / torch.abs(audio_prompt).max()
-            audio_prompt_duration = len(audio_prompt[0]) / sample_rate
-            
-            multiplier = 1 if model_version == "melody" else 2
-            model.set_generation_params(
-                duration=audio_prompt_duration * multiplier,
-                top_k=top_k,
-                top_p=top_p,
-                temperature=temperature,
-                cfg_coef=classifier_free_guidance,
-            )
-
-            if model_version == "melody":
-                wav, tokens = model.generate_with_chroma(
-                    melody_wavs=audio_prompt,
-                    melody_sample_rate=sample_rate,
-                    descriptions=[prompt],
-                    return_tokens=True,
-                    progress=True,
+        try_num = 0
+        bpm_match = False
+        while not bpm_match and try_num < MAX_TRIES:
+            if audio_input:
+                audio_prompt, sample_rate = torchaudio.load(audio_input)
+                # normalize
+                audio_prompt = audio_prompt / torch.abs(audio_prompt).max()
+                audio_prompt_duration = len(audio_prompt[0]) / sample_rate
+                
+                multiplier = 1 if model_version == "melody" else 2
+                model.set_generation_params(
+                    duration=audio_prompt_duration * multiplier,
+                    top_k=top_k,
+                    top_p=top_p,
+                    temperature=temperature,
+                    cfg_coef=classifier_free_guidance,
                 )
+
+                if model_version == "melody":
+                    wav, tokens = model.generate_with_chroma(
+                        melody_wavs=audio_prompt,
+                        melody_sample_rate=sample_rate,
+                        descriptions=[prompt],
+                        return_tokens=True,
+                        progress=True,
+                    )
+                else:
+                    descriptions = {"descriptions": [prompt] } if prompt else {}
+                    wav, tokens = model.generate_continuation(
+                        prompt=audio_prompt,
+                        prompt_sample_rate=sample_rate,
+                        return_tokens=True,
+                        progress=True,
+                        **descriptions
+                    )
+                
+                # if use_multiband_diffusion:
+                #     wav = self.mbd.tokens_to_wav(tokens)
+
+                # wav = wav.cpu().detach().numpy()[0, 0]
+                # # normalize
+                # wav = wav / np.abs(wav).max()
+
+                # start_time = 0
+                # end_time = audio_prompt_duration * 2
+
+                # actual_bpm = bpm
+
+                # print(f"{start_time=}, {end_time=}")
+
             else:
-                descriptions = {"descriptions": [prompt] } if prompt else {}
-                wav, tokens = model.generate_continuation(
-                    prompt=audio_prompt,
-                    prompt_sample_rate=sample_rate,
-                    return_tokens=True,
-                    progress=True,
-                    **descriptions
-                )
+                wav, tokens = model.generate([prompt], return_tokens=True, progress=True)
+                
+            if use_multiband_diffusion:
+                left, right = model.compression_model.get_left_right_codes(tokens)
+                tokens = torch.cat([left, right])
+                wav = self.mbd.tokens_to_wav(tokens)
+
+            wav = wav.cpu().detach().numpy()[0, 0]
+            # normalize
+            wav = wav / np.abs(wav).max()
+
+            audio_duration = len(wav) / model.sample_rate
+
+            beats = self.estimate_beats(wav, model.sample_rate)
+            start_time, end_time = self.get_loop_points(beats)
             
-            # if use_multiband_diffusion:
-            #     wav = self.mbd.tokens_to_wav(tokens)
+            # shift to start 0 
+            if audio_input:
+                end_time = end_time - start_time
+                start_time = 0
 
-            # wav = wav.cpu().detach().numpy()[0, 0]
-            # # normalize
-            # wav = wav / np.abs(wav).max()
+            # loop_seconds = end_time - start_time
 
-            # start_time = 0
-            # end_time = audio_prompt_duration * 2
+            print("Beats:\n", beats)
+            print(f"{start_time=}, {end_time=}")
 
-            # actual_bpm = bpm
-
-            # print(f"{start_time=}, {end_time=}")
-
-        else:
-            wav, tokens = model.generate([prompt], return_tokens=True, progress=True)
-            
-        if use_multiband_diffusion:
-            left, right = model.compression_model.get_left_right_codes(tokens)
-            tokens = torch.cat([left, right])
-            wav = self.mbd.tokens_to_wav(tokens)
-
-        wav = wav.cpu().detach().numpy()[0, 0]
-        # normalize
-        wav = wav / np.abs(wav).max()
-
-        audio_duration = len(wav) / model.sample_rate
-
-        beats = self.estimate_beats(wav, model.sample_rate)
-        start_time, end_time = self.get_loop_points(beats)
-        
-        # shift to start 0 
-        end_time = end_time - start_time
-        start_time = 0
-
-        # loop_seconds = end_time - start_time
-
-        print("Beats:\n", beats)
-        print(f"{start_time=}, {end_time=}")
-
-        num_beats = len(beats[(beats[:, 0] >= start_time) & (beats[:, 0] < end_time)])
-        duration = end_time - start_time
-        actual_bpm = num_beats / duration * 60
-        if (
-            abs(actual_bpm - bpm) > 15
-            and abs(actual_bpm / 2 - bpm) > 15
-            and abs(actual_bpm * 2 - bpm) > 15
-        ):
-            # raise ValueError(
-            #     f"Failed to generate a loop in the requested {bpm} bpm. Please try again."
-            # )
-            print("could not generate loop in requested bpm, returning as is")
-            start_time = 0
-            end_time = audio_duration
-        else:
-            # Allow octave errors
-            if abs(actual_bpm / 2 - bpm) <= 10:
-                actual_bpm = actual_bpm / 2
-            elif abs(actual_bpm * 2 - bpm) <= 10:
-                actual_bpm = actual_bpm * 2
+            num_beats = len(beats[(beats[:, 0] >= start_time) & (beats[:, 0] < end_time)])
+            duration = end_time - start_time
+            actual_bpm = num_beats / duration * 60
+            if (
+                abs(actual_bpm - bpm) > 15
+                and abs(actual_bpm / 2 - bpm) > 15
+                and abs(actual_bpm * 2 - bpm) > 15
+            ):
+                # raise ValueError(
+                #     f"Failed to generate a loop in the requested {bpm} bpm. Please try again."
+                # )
+                print("could not generate loop in requested bpm, retrying or returning as is")
+                # start_time = 0
+                # end_time = audio_duration
+                try_num += 1
+            else:
+                # Allow octave errors
+                if abs(actual_bpm / 2 - bpm) <= 10:
+                    actual_bpm = actual_bpm / 2
+                elif abs(actual_bpm * 2 - bpm) <= 10:
+                    actual_bpm = actual_bpm * 2
+                bpm_match = True
 
         start_sample = int(start_time * model.sample_rate)
         end_sample = int(end_time * model.sample_rate)
@@ -268,12 +276,12 @@ class Predictor(BasePredictor):
         # num_lead = len(lead)
         # loop[-num_lead:] *= np.linspace(1, 0, num_lead)
         # loop[-num_lead:] += np.linspace(0, 1, num_lead) * lead
-
-        
-        stretched = pyrb.time_stretch(loop, model.sample_rate, bpm / actual_bpm)
+        if bpm_match:
+            print("Time stretch rate", bpm/actual_bpm)
+            loop = pyrb.time_stretch(loop, model.sample_rate, bpm / actual_bpm)
 
         outputs = []
-        self.write(stretched, model.sample_rate, output_format, "out-0")
+        self.write(loop, model.sample_rate, output_format, "out-0")
         outputs.append(Path("out-0.wav"))
 
         # if variations > 1:
