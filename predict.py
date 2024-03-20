@@ -51,21 +51,8 @@ class Predictor(BasePredictor):
         """Load the model into memory to make running multiple predictions efficient"""
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # self.medium_model = self._load_model(
-        #     model_path=MODEL_PATH,
-        #     cls=MusicGen,
-        #     model_id="facebook/musicgen-medium",
-        # )
-        # self.medium_model = MusicGen.get_pretrained('facebook/musicgen-medium')
-        # self.lofi_model = MusicGen.get_pretrained('/src/models/lofi')
-        self.melody_model = MusicGen.get_pretrained("facebook/musicgen-stereo-melody-large")
-        
-        # self.large_model = self._load_model(
-        #     model_path=MODEL_PATH,
-        #     cls=MusicGen,
-        #     model_id="facebook/musicgen-large",
-        # )
-        self.large_model = MusicGen.get_pretrained('facebook/musicgen-stereo-large')
+        self.model = None
+        self.model_version = None
 
         self.mbd = MultiBandDiffusion.get_mbd_musicgen()
 
@@ -78,7 +65,14 @@ class Predictor(BasePredictor):
             device="cuda:0",
         )
 
-        
+    def load_model(self, model_version):
+        if model_version == "melody":
+            model = MusicGen.get_pretrained("facebook/musicgen-stereo-melody-large")
+        elif model_version == "large":
+            model = MusicGen.get_pretrained('facebook/musicgen-stereo-large')
+        elif model_version == "lofi":
+            model = MusicGen.get_pretrained('./models/lofi/1/')
+        return model
 
     def predict(
         self,
@@ -99,9 +93,9 @@ class Predictor(BasePredictor):
             ge=2,
         ),
         model_version: str = Input(
-            description="Model to use for generation. .",
+            description="Model to use for generation.",
             default="large",
-            choices=["melody", "large","lofi"],
+            choices=["melody", "large", "lofi"],
         ),
         top_k: int = Input(
             description="Reduces sampling to the k most likely tokens.", default=250
@@ -140,14 +134,12 @@ class Predictor(BasePredictor):
             prompt = f", {bpm}bpm. 320kbps 48khz. {prompt}"
         if not prompt:
             prompt = None
-        # model = self.medium_model if model_version == "medium" else self.large_model
 
-        if model_version == "melody":
-            model = self.melody_model
-        elif model_version == "large":
-            model = self.large_model
-        elif model_version == "lofi":
-            model = self.lofi_model
+        if self.model_version != model_version:
+            self.model = self.load_model(model_version)
+            self.model_version = model_version
+
+        model = self.model
 
         model.set_generation_params(
             duration=max_duration,
@@ -201,20 +193,6 @@ class Predictor(BasePredictor):
                         **descriptions
                     )
                 
-                # if use_multiband_diffusion:
-                #     wav = self.mbd.tokens_to_wav(tokens)
-
-                # wav = wav.cpu().detach().numpy()[0, 0]
-                # # normalize
-                # wav = wav / np.abs(wav).max()
-
-                # start_time = 0
-                # end_time = audio_prompt_duration * 2
-
-                # actual_bpm = bpm
-
-                # print(f"{start_time=}, {end_time=}")
-
             else:
                 wav, tokens = model.generate([prompt], return_tokens=True, progress=True)
                 
@@ -231,13 +209,13 @@ class Predictor(BasePredictor):
 
             beats = self.estimate_beats(wav, model.sample_rate)
             start_time, end_time = self.get_loop_points(beats)
+            if not end_time:
+                continue
             
             # shift to start 0 
             if audio_input:
                 end_time = end_time - start_time
                 start_time = 0
-
-            # loop_seconds = end_time - start_time
 
             print("Beats:\n", beats)
             print(f"{start_time=}, {end_time=}")
@@ -250,12 +228,7 @@ class Predictor(BasePredictor):
                 and abs(actual_bpm / 2 - bpm) > 15
                 and abs(actual_bpm * 2 - bpm) > 15
             ):
-                # raise ValueError(
-                #     f"Failed to generate a loop in the requested {bpm} bpm. Please try again."
-                # )
                 print("could not generate loop in requested bpm, retrying or returning as is")
-                # start_time = 0
-                # end_time = audio_duration
                 try_num += 1
             else:
                 # Allow octave errors
@@ -269,13 +242,6 @@ class Predictor(BasePredictor):
         end_sample = int(end_time * model.sample_rate)
         loop = wav[start_sample:end_sample]
 
-        # # do a quick blend with the lead-in do avoid clicks
-        # num_lead = 100
-        # lead_start = start_sample - num_lead
-        # lead = wav[lead_start:start_sample]
-        # num_lead = len(lead)
-        # loop[-num_lead:] *= np.linspace(1, 0, num_lead)
-        # loop[-num_lead:] += np.linspace(0, 1, num_lead) * lead
         if bpm_match:
             print("Time stretch rate", bpm/actual_bpm)
             loop = pyrb.time_stretch(loop, model.sample_rate, bpm / actual_bpm)
@@ -284,66 +250,6 @@ class Predictor(BasePredictor):
         self.write(loop, model.sample_rate, output_format, "out-0")
         outputs.append(Path("out-0.wav"))
 
-        # if variations > 1:
-        #     # Use last 4 beats as audio prompt
-        #     last_4beats = beats[beats[:, 0] <= end_time][-5:]
-        #     audio_prompt_start_time = last_4beats[0][0]
-        #     audio_prompt_end_time = last_4beats[-1][0]
-        #     audio_prompt_start_sample = int(audio_prompt_start_time * model.sample_rate)
-        #     audio_prompt_end_sample = int(audio_prompt_end_time * model.sample_rate)
-        #     audio_prompt_seconds = audio_prompt_end_time - audio_prompt_start_time
-        #     audio_prompt = torch.tensor(
-        #         wav[audio_prompt_start_sample:audio_prompt_end_sample]
-        #     )[None]
-        #     audio_prompt_duration = audio_prompt_end_sample - audio_prompt_start_sample
-
-        #     model.set_generation_params(
-        #         duration=loop_seconds + audio_prompt_seconds + 0.1,
-        #         top_k=top_k,
-        #         top_p=top_p,
-        #         temperature=temperature,
-        #         cfg_coef=classifier_free_guidance,
-        #     )
-
-        #     for i in range(1, variations):
-        #         print(f"\nGenerating variation {i + 1}")
-
-        #         continuation, tokens = model.generate_continuation(
-        #             prompt=audio_prompt,
-        #             prompt_sample_rate=model.sample_rate,
-        #             descriptions=[prompt],
-        #             return_tokens=True,
-        #             progress=True,
-        #         )
-                
-        #         if use_multiband_diffusion:
-        #             continuation = self.mbd.tokens_to_wav(tokens)
-
-        #         variation_loop = continuation.cpu().detach().numpy()[
-        #             0, 0, audio_prompt_duration : audio_prompt_duration + len(loop)
-        #         ]
-        #         variation_loop[-num_lead:] *= np.linspace(1, 0, num_lead)
-        #         variation_loop[-num_lead:] += np.linspace(0, 1, num_lead) * lead
-
-        #         variation_stretched = pyrb.time_stretch(
-        #             variation_loop, model.sample_rate, bpm / actual_bpm
-        #         )
-        #         # add_output(
-        #         #     outputs,
-        #         #     self.write(
-        #         #         variation_stretched,
-        #         #         model.sample_rate,
-        #         #         output_format,
-        #         #         f"out-{i}",
-        #         #     ),
-        #         # )
-        #         self.write(
-        #             variation_stretched,
-        #             model.sample_rate,
-        #             output_format,
-        #             f"out-{i}",
-        #         ) 
-        #         outputs.append(Path(f"out-{i}.wav"))
         return outputs
 
     def estimate_beats(self, wav, sample_rate):
@@ -366,11 +272,12 @@ class Predictor(BasePredictor):
             )
 
         even_num_bars = int((num_bars // 4) * 4)
-        #even_num_bars = int(2 ** np.floor(np.log2(num_bars)))
         if even_num_bars < 4:
             even_num_bars = 4
         print("even_num_bars", even_num_bars)        
         start_time = downbeat_times[0]
+        if num_bars < even_num_bars:
+            return start_time, None
         end_time = downbeat_times[even_num_bars]
 
         return start_time, end_time
